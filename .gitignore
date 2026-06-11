@@ -1,0 +1,28 @@
+# Environment files with secrets
+.env
+*.env.local
+config/
+!agent/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Kubernetes secrets (never commit)
+*-secret.yaml
+*-credentials.yaml
+
+# Session handoff docs
+HANDOFF.md

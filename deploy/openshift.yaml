@@ -1,0 +1,182 @@
+# =============================================================================
+# Phase 0: Migration Agent -- Connectivity Verification
+# =============================================================================
+# Deploy with: oc apply -f deploy/openshift.yaml -n <namespace>
+#
+# Before applying:
+#   1. Run scripts/gather-config.sh to generate your environment values
+#   2. Create secrets: oc create secret generic mtv-cluster-token --from-literal=token=<TOKEN>
+#   3. Replace placeholder values below with your environment specifics
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: adk-web-config
+  labels:
+    app: adk-web
+data:
+  runtime-config.json: |
+    {
+      "backendUrl": "/api"
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adk-web
+  labels:
+    app: adk-web
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: adk-web
+  template:
+    metadata:
+      labels:
+        app: adk-web
+    spec:
+      imagePullSecrets:
+        - name: quay-pull-secret
+      containers:
+        - name: adk-web
+          image: quay.io/rbrhssa/adk-web:oidc
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: web-config
+              mountPath: /usr/share/nginx/html/assets/config/runtime-config.json
+              subPath: runtime-config.json
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+        - name: adk-api
+          image: quay.io/rbrhssa/adk-agent:migration
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: api
+          env:
+            # -- LLM provider --
+            - name: OPENAI_API_BASE
+              value: "REPLACE_LLM_API_BASE"
+            - name: OPENAI_API_KEY
+              value: "not-needed"
+            - name: ADK_MODEL
+              value: "REPLACE_ADK_MODEL"
+            # -- Agent config --
+            - name: AGENT_NAME
+              value: "migration_agent"
+            - name: AGENT_MODE
+              value: "single"
+            # -- LLM generation parameters --
+            - name: ADK_TEMPERATURE
+              value: "0.2"
+            - name: ADK_MAX_OUTPUT_TOKENS
+              value: "4096"
+            # -- MTV cluster (empty = not configured for Phase 0) --
+            - name: MTV_API_URL
+              value: ""
+            - name: MTV_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mtv-cluster-token
+                  key: token
+                  optional: true
+            # -- OCP Virt cluster (empty = same as MTV) --
+            - name: VIRT_API_URL
+              value: ""
+            - name: VIRT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: virt-cluster-token
+                  key: token
+                  optional: true
+            # -- MTV inventory (empty = auto-discover) --
+            - name: MTV_INVENTORY_URL
+              value: ""
+            # -- AAP (empty = not configured for Phase 0) --
+            - name: AAP_URL
+              value: ""
+            - name: AAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aap-agent-token
+                  key: token
+                  optional: true
+          volumeMounts:
+            - name: agent-storage
+              mountPath: /app/.adk
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /list-apps
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: web-config
+          configMap:
+            name: adk-web-config
+        - name: agent-storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adk-web
+  labels:
+    app: adk-web
+spec:
+  selector:
+    app: adk-web
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: adk-web
+  labels:
+    app: adk-web
+  annotations:
+    haproxy.router.openshift.io/timeout: 600s
+spec:
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: adk-web
+    weight: 100
+  port:
+    targetPort: http

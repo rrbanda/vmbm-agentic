@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    "google-adk>=1.0.0,<2.0.0" \
+    litellm \
+    python-dotenv \
+    requests \
+    kubernetes \
+    tenacity \
+    aiosqlite
+
+COPY agent/app/ ./app/
+
+RUN chown -R 1001:0 /app
+
+# Persistent storage directory (mounted as PVC in OpenShift)
+RUN mkdir -p /app/.adk && chown 1001:0 /app/.adk
+
+USER 1001
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/list-apps')" || exit 1
+
+CMD ["sh", "-c", "exec adk api_server --host 0.0.0.0 --port ${ADK_PORT:-8000} --allow_origins ${ADK_ALLOW_ORIGINS:-*} --no-reload --session_service_uri ${ADK_SESSION_URI:-sqlite+aiosqlite:////app/.adk/sessions.db} --artifact_service_uri ${ADK_ARTIFACT_URI:-file:///app/.adk/artifacts} ."]
