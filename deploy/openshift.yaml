@@ -39,8 +39,11 @@ spec:
       labels:
         app: adk-web
     spec:
-      imagePullSecrets:
-        - name: quay-pull-secret
+      # Image pull secret only needed if using external registry (quay.io).
+      # When built on-cluster via BuildConfig, the internal registry is used
+      # and no pull secret is required.
+      # imagePullSecrets:
+      #   - name: quay-pull-secret
       containers:
         - name: adk-web
           image: quay.io/rbrhssa/adk-web:oidc
@@ -72,19 +75,19 @@ spec:
             initialDelaySeconds: 3
             periodSeconds: 5
         - name: adk-api
-          image: quay.io/rbrhssa/adk-agent:migration
-          imagePullPolicy: Always
+          image: image-registry.openshift-image-registry.svc:5000/NAMESPACE/adk-agent:phase0
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
               name: api
           env:
-            # -- LLM provider --
+            # -- LLM provider (set via oc set env or gather-config.sh) --
             - name: OPENAI_API_BASE
-              value: "REPLACE_LLM_API_BASE"
+              value: ""
             - name: OPENAI_API_KEY
               value: "not-needed"
             - name: ADK_MODEL
-              value: "REPLACE_ADK_MODEL"
+              value: "openai/gpt-oss-120b"
             # -- Agent config --
             - name: AGENT_NAME
               value: "migration_agent"
