@@ -37,7 +37,6 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "migration_agent")
 # ---------------------------------------------------------------------------
 _GENERATE_CONFIG = types.GenerateContentConfig(
     temperature=float(os.environ.get("ADK_TEMPERATURE", "0.2")),
-    max_output_tokens=int(os.environ.get("ADK_MAX_OUTPUT_TOKENS", "4096")),
 )
 
 # ---------------------------------------------------------------------------

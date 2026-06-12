@@ -96,8 +96,6 @@ spec:
             # -- LLM generation parameters --
             - name: ADK_TEMPERATURE
               value: "0.2"
-            - name: ADK_MAX_OUTPUT_TOKENS
-              value: "4096"
             # -- MTV cluster (empty = not configured for Phase 0) --
             - name: MTV_API_URL
               value: ""

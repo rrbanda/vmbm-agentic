@@ -135,7 +135,6 @@ oc set env deployment/adk-web -n "$NAMESPACE" -c adk-api \
     AGENT_NAME="${AGENT_NAME:-migration_agent}" \
     AGENT_MODE="${AGENT_MODE:-single}" \
     ADK_TEMPERATURE="${ADK_TEMPERATURE:-0.2}" \
-    ADK_MAX_OUTPUT_TOKENS="${ADK_MAX_OUTPUT_TOKENS:-4096}" \
     MTV_API_URL="${MTV_API_URL:-}" \
     VIRT_API_URL="${VIRT_API_URL:-}" \
     MTV_INVENTORY_URL="${MTV_INVENTORY_URL:-}" \
