@@ -93,6 +93,8 @@ spec:
               value: "migration_agent"
             - name: AGENT_MODE
               value: "single"
+            - name: SKILLS_DIR
+              value: "/skills"
             # -- LLM generation parameters --
             - name: ADK_TEMPERATURE
               value: "0.2"

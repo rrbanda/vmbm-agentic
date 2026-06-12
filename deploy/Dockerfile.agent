@@ -13,6 +13,10 @@ RUN pip install --no-cache-dir \
 
 COPY agent/app/ ./app/
 
+# Copy skills (can be overridden by ConfigMap mount at /skills)
+RUN mkdir -p /skills && chown 1001:0 /skills
+COPY agent/app/skills/ /skills/
+
 RUN chown -R 1001:0 /app
 
 # Persistent storage directory (mounted as PVC in OpenShift)

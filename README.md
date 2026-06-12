@@ -11,41 +11,39 @@ is demonstrable in a single working session.
 
 | Phase | Title | What It Adds |
 |-------|-------|-------------|
-| **0** | **Authentication & Connectivity** | Agent deployed, probes all systems | **<-- Current** |
-| 1 | Working UI with Demo Mode | 11 skills, sample data analysis, reports |
+| **0** | Authentication & Connectivity | Agent deployed, probes all systems |
+| **1** | **Working UI with Demo Mode** | 11 skills, sample data analysis, reports | **<-- Current** |
 | 2 | Live VM Inventory | Read-only VMware inventory via MTV |
 | 3 | Live Pre-Migration Assessment | AAP integration for Ansible playbooks |
 | 4 | Automated Migration & Monitoring | MTV write access, HITL approval, log analysis |
 | 5 | Post-Migration Validation & Report | Full validation, before/after comparison, sign-off |
 
-## Current Phase: Phase 0
+## Current Phase: Phase 1
 
-Phase 0 proves that the agent can reach every system it needs. No data is read
-or modified. The agent has a single tool (`check_connectivity`) that probes
-LLM, MTV, OCP Virt, and AAP endpoints and reports their status.
+Phase 1 adds 11 domain analysis skills and report generation. The agent can
+analyze bundled sample Ansible playbook output (pre-migration and post-migration)
+and produce structured readiness reports with risk ratings, blockers, and
+remediation steps. No customer systems are accessed beyond the LLM.
 
-### Quick Start
+### Quick Start (Upgrade from Phase 0)
 
 ```bash
-# 1. Check your environment
-./scripts/env-check.sh
-
-# 2. Generate configuration interactively
-./scripts/gather-config.sh
-
-# 3. Deploy the agent
-./scripts/deploy-phase0.sh
-
-# 4. Validate
-./scripts/validate-phase0.sh
+git checkout phase-1-demo-mode
+./scripts/deploy-phase1.sh
 ```
 
-### Demo Prompt
+### Demo Prompts
 
-> Check connectivity to all configured systems and show me the status of each integration.
+> What skills do you have available?
 
-See [docs/phase-0-guide.md](docs/phase-0-guide.md) for the full setup guide,
-glossary, and architecture overview.
+> Analyze the sample pre-migration output and produce a readiness assessment report
+
+> Analyze the sample post-migration output and produce a validation report
+
+> Assess migration risk for a RHEL 7 VM with 500GB disk and no backup
+
+See [docs/phase-1-session-runbook.md](docs/phase-1-session-runbook.md) for the
+full customer session walkthrough.
 
 ## License
 
