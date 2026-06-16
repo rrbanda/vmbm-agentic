@@ -12,8 +12,8 @@ is demonstrable in a single working session.
 | Phase | Title | What It Adds |
 |-------|-------|-------------|
 | **0** | Authentication & Connectivity | Agent deployed, probes all systems |
-| **1** | **Working UI with Demo Mode** | 11 skills, sample data analysis, reports | **<-- Current** |
-| 2 | Live VM Inventory | Read-only VMware inventory via MTV |
+| 1 | Working UI with Demo Mode | 11 skills, sample data analysis, reports |
+| **2** | **Live VM Inventory** | Read-only VMware inventory via MTV | **<-- Current** |
 | 3 | Live Pre-Migration Assessment | AAP integration for Ansible playbooks |
 | 4 | Automated Migration & Monitoring | MTV write access, HITL approval, log analysis |
 | 5 | Post-Migration Validation & Report | Full validation, before/after comparison, sign-off |
