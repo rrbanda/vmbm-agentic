@@ -1,12 +1,12 @@
 """VMware-to-OpenShift Virtualization Migration Agent.
 
-Phase 2: Live VM Inventory (Read-Only MTV Access).
+Phase 3: Live Pre-Migration Assessment via AAP.
 
-The agent can now discover real VMware VMs via the MTV Forklift inventory
-and view migrated VMs on OCP Virtualization. All access is read-only --
-no migrations are triggered.
+The agent can now trigger real Ansible pre-migration assessment playbooks
+on the customer's VMs via AAP, poll until completion, retrieve the output,
+and analyze it through the 36-check framework.
 
-Previous phase capabilities (connectivity check, skills, reports) remain.
+Previous phase capabilities (connectivity, skills, VM inventory) remain.
 """
 
 import logging
@@ -27,6 +27,14 @@ from .ocp_tools import (
     get_vm_details,
     list_migrated_vms,
     list_vmware_vms,
+)
+from .aap_tools import (
+    PRE_MIGRATION_TEMPLATE_ID,
+    POST_MIGRATION_TEMPLATE_ID,
+    get_job_output,
+    get_job_status,
+    launch_job,
+    list_job_templates,
 )
 
 log = logging.getLogger(__name__)
@@ -67,6 +75,12 @@ def _discover_skills(skills_dir: pathlib.Path) -> list:
 skills = _discover_skills(SKILLS_DIR)
 log.info("Discovered %d skills from %s", len(skills), SKILLS_DIR)
 
+aap_url = os.environ.get("AAP_URL", "")
+if aap_url:
+    log.info("AAP integration enabled: %s", aap_url)
+else:
+    log.info("AAP integration disabled (AAP_URL not set)")
+
 # ---------------------------------------------------------------------------
 # Callbacks
 # ---------------------------------------------------------------------------
@@ -80,44 +94,62 @@ def _after_tool_callback(tool, args, tool_context, tool_response):
     return None
 
 # ---------------------------------------------------------------------------
-# Phase 2 instruction
+# Phase 3 instruction
 # ---------------------------------------------------------------------------
-_PHASE2_INSTRUCTION = (
+_pre_template_hint = (
+    f"The pre-migration AAP job template ID is {PRE_MIGRATION_TEMPLATE_ID}. "
+    "Use `launch_job(template_id)` with the VM hostname as extra_vars to trigger it. "
+    if PRE_MIGRATION_TEMPLATE_ID else
+    "No PRE_MIGRATION_TEMPLATE_ID is configured. Use `list_job_templates()` to "
+    "discover available templates, then use `launch_job(template_id)` to trigger one. "
+)
+
+_PHASE3_INSTRUCTION = (
     "You are a VMware-to-OpenShift Virtualization migration agent.\n\n"
-    "## Current Phase: Phase 2 -- Live VM Inventory\n\n"
-    "You can now discover real VMware VMs from the customer's environment "
-    "and view VMs that have already been migrated to OCP Virtualization. "
-    "All access is read-only -- you cannot trigger migrations yet.\n\n"
-    "## VM Discovery Tools\n"
-    f"- `list_vmware_vms(namespace)` -- List VMs on VMware vSphere via MTV inventory (default namespace: {DEFAULT_MTV_NAMESPACE})\n"
-    f"- `list_migrated_vms(namespace)` -- List VMs already on OCP Virtualization (default namespace: {DEFAULT_VIRT_NAMESPACE})\n"
-    "- `get_vm_details(namespace, vm_name)` -- Get detailed VM spec (CPU, memory, disks, interfaces)\n"
-    "- `get_migration_status(namespace)` -- Check MTV migration plan status\n\n"
+    "## Current Phase: Phase 3 -- Live Pre-Migration Assessment via AAP\n\n"
+    "You can now trigger real Ansible pre-migration assessment playbooks on the "
+    "customer's VMs via Ansible Automation Platform (AAP).\n\n"
+    "## AAP Tools\n"
+    "- `list_job_templates()` -- List available AAP job templates (confirms connectivity)\n"
+    "- `launch_job(template_id, extra_vars)` -- Trigger an Ansible playbook\n"
+    "  - extra_vars is a JSON string, e.g., '{\"target_host\": \"vm-name\"}'\n"
+    "- `get_job_status(job_id)` -- Poll job progress (terminal: successful, failed, error, canceled)\n"
+    "- `get_job_output(job_id)` -- Retrieve full playbook stdout when job is complete\n\n"
+    f"## Pre-Migration Assessment\n{_pre_template_hint}\n"
+    "When asked to assess a VM:\n"
+    "1. Launch the pre-migration job template with the VM hostname\n"
+    "2. Poll `get_job_status` until the job completes\n"
+    "3. Retrieve the output with `get_job_output`\n"
+    "4. Load the `ansible-output-parser` skill to parse the output\n"
+    "5. Load `pre-migration-analyzer` skill for the 36-check evaluation\n"
+    "6. Generate a readiness report using `assessment-report-generator` skill\n"
+    "7. Save the report with `save_report_artifact`\n\n"
+    "## VM Discovery Tools (from Phase 2)\n"
+    f"- `list_vmware_vms(namespace)` -- List VMware VMs (default: {DEFAULT_MTV_NAMESPACE})\n"
+    f"- `list_migrated_vms(namespace)` -- List OCP Virt VMs (default: {DEFAULT_VIRT_NAMESPACE})\n"
+    "- `get_vm_details(namespace, vm_name)` -- Detailed VM spec\n"
+    "- `get_migration_status(namespace)` -- MTV plan status\n\n"
     "## Skills (from Phase 1)\n"
-    "Use `list_skills` to see all available analysis skills.\n"
-    "Key skills: pre-migration-analyzer, post-migration-validator, "
-    "ansible-output-parser, assessment-report-generator, risk-assessor.\n\n"
+    "Use `list_skills` to see all 11 available skills.\n"
+    "Key skills for assessment: ansible-output-parser, pre-migration-analyzer, "
+    "assessment-report-generator, risk-assessor.\n\n"
     "## Sample Data (Demo Mode)\n"
-    "When asked to analyze sample output:\n"
+    "When AAP is not configured or for demo purposes:\n"
     "- Pre-migration: `load_skill_resource` with skill `pre-migration-analyzer`, "
     "resource `references/samples/pre-migration-playbook-output.txt`\n"
     "- Post-migration: `load_skill_resource` with skill `post-migration-validator`, "
     "resource `references/samples/post-migration-playbook-output.txt`\n\n"
-    "## Reports\n"
-    "After generating any report, call `save_report_artifact(report_content, filename)` "
-    "to save it as a downloadable artifact.\n\n"
     "## Connectivity\n"
-    "Use `check_connectivity` to verify system connections.\n\n"
+    "Use `check_connectivity` to verify all system connections.\n\n"
     "## What You Cannot Do Yet\n"
-    "- Trigger live AAP playbooks (Phase 3)\n"
     "- Execute migrations (Phase 4)\n"
-    "- Read pod logs for troubleshooting (Phase 4)\n"
+    "- Read forklift pod logs (Phase 4)\n"
 )
 
 # ---------------------------------------------------------------------------
 # Build the agent
 # ---------------------------------------------------------------------------
-log.info("Building Phase 2 agent: live VM inventory (read-only)")
+log.info("Building Phase 3 agent: live AAP pre-migration assessment")
 
 tools = [
     check_connectivity,
@@ -126,6 +158,10 @@ tools = [
     list_migrated_vms,
     get_vm_details,
     get_migration_status,
+    list_job_templates,
+    launch_job,
+    get_job_status,
+    get_job_output,
 ]
 if skills:
     tools.append(SkillToolset(skills=skills))
@@ -135,14 +171,14 @@ root_agent = LlmAgent(
     name=AGENT_NAME,
     description=(
         "VMware-to-OpenShift Virtualization migration agent. "
-        "Phase 2: Live VM inventory via MTV Forklift (read-only). "
-        "Discovers real VMware VMs and views migrated VMs on OCP Virt."
+        "Phase 3: Live pre-migration assessment via AAP. "
+        "Triggers real Ansible playbooks, analyzes output, generates reports."
     ),
-    instruction=_PHASE2_INSTRUCTION,
+    instruction=_PHASE3_INSTRUCTION,
     tools=tools,
     generate_content_config=_GENERATE_CONFIG,
     before_tool_callback=_before_tool_callback,
     after_tool_callback=_after_tool_callback,
 )
 
-log.info("Phase 2 agent ready: %s (tools: %d, skills: %d)", root_agent.name, len(tools), len(skills))
+log.info("Phase 3 agent ready: %s (tools: %d, skills: %d)", root_agent.name, len(tools), len(skills))

@@ -119,7 +119,7 @@ spec:
             # -- MTV inventory (empty = auto-discover) --
             - name: MTV_INVENTORY_URL
               value: ""
-            # -- AAP (empty = not configured for Phase 0) --
+            # -- AAP (Ansible Automation Platform) --
             - name: AAP_URL
               value: ""
             - name: AAP_TOKEN
@@ -128,6 +128,12 @@ spec:
                   name: aap-agent-token
                   key: token
                   optional: true
+            - name: AAP_API_PREFIX
+              value: "/api/controller/v2"
+            - name: PRE_MIGRATION_TEMPLATE_ID
+              value: ""
+            - name: POST_MIGRATION_TEMPLATE_ID
+              value: ""
           volumeMounts:
             - name: agent-storage
               mountPath: /app/.adk
