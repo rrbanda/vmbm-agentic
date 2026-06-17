@@ -1,10 +1,12 @@
-"""OCP Virt / MTV read-only tools for the migration agent.
+"""OCP Virt / MTV integration tools for the migration agent.
 
-Phase 2: Live VM inventory -- read-only access to VMware inventory
-via MTV Forklift and KubeVirt VMs on OCP Virt. No data is modified.
+These FunctionTools allow the ADK agent to interact with OpenShift
+Virtualization and Migration Toolkit for Virtualization (MTV/Forklift)
+to list VMware VMs, trigger migrations, monitor status, and read logs.
 
-Migration execution tools (create_migration_plan, get_pod_logs) are
-added in later phases.
+Supports multi-cluster deployments: the agent can run on any cluster
+while connecting to separate MTV and OCP Virt clusters via environment
+variables. See cluster_clients.py for configuration details.
 """
 
 import logging
@@ -53,8 +55,10 @@ from .cluster_clients import (  # noqa: E402
     MTV_INVENTORY_ROUTE_NAME,
     MTV_INVENTORY_URL,
     MTV_OPERATOR_NAMESPACE,
+    TARGET_STORAGE_CLASS,
     _get_inventory_token,
     mtv_custom_api,
+    virt_core_api,
     virt_custom_api,
 )
 
@@ -79,16 +83,98 @@ _k8s_retry = retry(
 
 @_k8s_retry
 def _k8s_list(api, **kwargs):
+    """list_namespaced_custom_object with retry on transient errors."""
     return api.list_namespaced_custom_object(**kwargs)
 
 
 @_k8s_retry
 def _k8s_get(api, **kwargs):
+    """get_namespaced_custom_object with retry on transient errors."""
     return api.get_namespaced_custom_object(**kwargs)
 
 
+@_k8s_retry
+def _k8s_create(api, **kwargs):
+    """create_namespaced_custom_object with retry on transient errors (except 409)."""
+    return api.create_namespaced_custom_object(**kwargs)
+
+
+def _k8s_delete(api, **kwargs):
+    """delete_namespaced_custom_object (best-effort, no retry)."""
+    try:
+        api.delete_namespaced_custom_object(**kwargs)
+        return True
+    except ApiException as e:
+        if e.status == 404:
+            return True
+        log.warning("Failed to delete %s/%s: %s", kwargs.get("plural"), kwargs.get("name"), e.reason)
+        return False
+
+
+def _check_existing_plan(api, namespace, plan_name):
+    """Check if a plan already exists and return its state.
+
+    Returns:
+        None if no plan exists.
+        "succeeded" if the plan completed successfully.
+        "running" if the plan is currently executing.
+        "cleaned" if a failed plan was found and deleted.
+    """
+    migration_name = f"{plan_name}-migration"
+    nmap_name = f"{plan_name}-netmap"
+    smap_name = f"{plan_name}-stormap"
+
+    try:
+        existing_plan = _k8s_get(api,
+            group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+            namespace=namespace, plural="plans", name=plan_name,
+        )
+        conditions = existing_plan.get("status", {}).get("conditions", [])
+        condition_types = {c.get("type") for c in conditions if c.get("status") == "True"}
+        migration_status = existing_plan.get("status", {}).get("migration", {})
+        vms = migration_status.get("vms", [])
+        vms_failed = sum(1 for v in vms if v.get("phase") == "Failed")
+        vms_succeeded = sum(1 for v in vms if v.get("phase") in ("Completed", "Succeeded"))
+        vms_running = sum(1 for v in vms if v.get("phase") == "Running")
+
+        if vms_running > 0 or "Running" in condition_types:
+            return "running"
+
+        if vms_succeeded > 0 and vms_failed == 0 and "Succeeded" in condition_types or "Ready" in condition_types:
+            if vms_succeeded > 0:
+                return "succeeded"
+
+        is_failed = "Failed" in condition_types or "Canceled" in condition_types or vms_failed > 0
+        if is_failed:
+            log.info("Found failed migration plan '%s', cleaning up for retry", plan_name)
+            _k8s_delete(api, group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+                         namespace=namespace, plural="migrations", name=migration_name)
+            _k8s_delete(api, group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+                         namespace=namespace, plural="plans", name=plan_name)
+            _k8s_delete(api, group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+                         namespace=namespace, plural="networkmaps", name=nmap_name)
+            _k8s_delete(api, group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+                         namespace=namespace, plural="storagemaps", name=smap_name)
+            log.info("Cleaned up failed migration resources for plan '%s'", plan_name)
+            return "cleaned"
+
+        return None
+    except ApiException as e:
+        if e.status == 404:
+            return None
+        log.warning("Error checking plan '%s': %s", plan_name, e.reason)
+        return None
+
+
 def _resolve_inventory(mtv_api, provider_uid: str) -> tuple[str, str]:
-    """Resolve the Forklift inventory base URL and auth token."""
+    """Resolve the Forklift inventory base URL and auth token.
+
+    If MTV_INVENTORY_URL is set, uses it directly (no Route lookup needed).
+    Otherwise discovers the URL from the Route CR on the MTV cluster.
+
+    Returns:
+        (inventory_base_url, bearer_token)
+    """
     token = _get_inventory_token()
 
     if MTV_INVENTORY_URL:
@@ -311,6 +397,303 @@ def get_migration_status(namespace: str = "") -> dict:
             "plans": plan_list, "plan_count": len(plan_list),
             "migrations": migration_list, "migration_count": len(migration_list),
         }
+    except ApiException as e:
+        return {"error": f"Kubernetes API error: {e.status} {e.reason}"}
+    except Exception as e:
+        return {"error": f"Error: {str(e)}"}
+
+
+def create_migration_plan(
+    namespace: str,
+    vm_name: str,
+    plan_name: str = "",
+    target_namespace: str = "",
+) -> dict:
+    """Create an MTV migration plan and trigger it for a VMware VM.
+
+    Creates the required NetworkMap, StorageMap, Plan, and Migration CRs
+    to migrate a VM from VMware to OCP Virtualization.
+
+    IMPORTANT: This will START a real migration. The VM will be copied
+    from VMware to OpenShift Virtualization.
+
+    Args:
+        namespace: The MTV namespace with the VMware provider.
+        vm_name: The name of the VMware VM to migrate.
+        plan_name: Optional name for the plan (auto-generated if empty).
+        target_namespace: Target namespace for the migrated VM (uses DEFAULT_VIRT_NAMESPACE if empty).
+
+    Returns:
+        Dictionary with plan name, migration name, and status.
+    """
+    if not K8S_AVAILABLE:
+        return {"error": "kubernetes Python client not installed"}
+
+    if not namespace or not namespace.strip():
+        return {"error": "namespace is required"}
+    if not vm_name or not vm_name.strip():
+        return {"error": "vm_name is required"}
+
+    _FORKLIFT_API = f"{FORKLIFT_GROUP}/{FORKLIFT_VERSION}"
+    created_resources = []
+
+    try:
+        api = mtv_custom_api()
+        if api is None:
+            return {"error": "Kubernetes client not available. Check cluster configuration."}
+
+        log.info("Creating migration plan for VM '%s' in namespace '%s'", vm_name, namespace)
+
+        providers = _k8s_list(api,
+            group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+            namespace=namespace, plural="providers",
+        )
+        vmware_provider = next(
+            (p for p in providers.get("items", [])
+             if p.get("spec", {}).get("type") == "vsphere"), None
+        )
+        host_provider = next(
+            (p for p in providers.get("items", [])
+             if p.get("spec", {}).get("type") == "openshift"), None
+        )
+        if not vmware_provider:
+            return {"error": f"No VMware (vsphere) provider found in namespace '{namespace}'"}
+        if not host_provider:
+            return {"error": f"No OpenShift provider found in namespace '{namespace}'"}
+
+        provider_uid = vmware_provider["metadata"]["uid"]
+        inv_url, token = _resolve_inventory(api, provider_uid)
+
+        resp = _http_get(
+            f"{inv_url}/providers/vsphere/{provider_uid}/vms",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        vms = resp.json()
+        target_vm = next((v for v in vms if v.get("name") == vm_name), None)
+        if not target_vm:
+            return {"error": f"VM '{vm_name}' not found in VMware inventory"}
+
+        if not plan_name:
+            import re
+            safe_name = re.sub(r"[^a-z0-9-]", "-", vm_name.lower()).strip("-")
+            safe_name = re.sub(r"-+", "-", safe_name)[:50]
+            plan_name = f"agent-plan-{safe_name}"
+        if not target_namespace:
+            target_namespace = DEFAULT_VIRT_NAMESPACE
+
+        existing = _check_existing_plan(api, namespace, plan_name)
+        if existing == "succeeded":
+            return {
+                "status": "Already migrated",
+                "plan_name": plan_name,
+                "vm_name": vm_name,
+                "message": f"VM '{vm_name}' was already successfully migrated via plan '{plan_name}'. "
+                           f"Use get_migration_status('{namespace}') to see details, or "
+                           f"get_vm_details('{target_namespace}', '{vm_name}') to inspect the migrated VM.",
+            }
+        if existing == "running":
+            return {
+                "status": "Migration in progress",
+                "plan_name": plan_name,
+                "vm_name": vm_name,
+                "message": f"VM '{vm_name}' is currently being migrated via plan '{plan_name}'. "
+                           f"Use get_migration_status('{namespace}') to monitor progress.",
+            }
+
+        src_provider_ref = {
+            "apiVersion": _FORKLIFT_API,
+            "kind": "Provider", "name": vmware_provider["metadata"]["name"],
+            "namespace": namespace,
+        }
+        dst_provider_ref = {
+            "apiVersion": _FORKLIFT_API,
+            "kind": "Provider", "name": host_provider["metadata"]["name"],
+            "namespace": namespace,
+        }
+
+        # Step 1: Create NetworkMap
+        nmap_name = f"{plan_name}-netmap"
+        nmap_map = []
+        if target_vm.get("networks"):
+            nmap_map = [{"source": {"id": target_vm["networks"][0]["id"]}, "destination": {"type": "pod"}}]
+
+        nmap = {
+            "apiVersion": _FORKLIFT_API,
+            "kind": "NetworkMap", "metadata": {"name": nmap_name, "namespace": namespace},
+            "spec": {
+                "provider": {"source": src_provider_ref, "destination": dst_provider_ref},
+                "map": nmap_map,
+            },
+        }
+        try:
+            _k8s_create(api,
+                group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+                namespace=namespace, plural="networkmaps", body=nmap,
+            )
+            created_resources.append(("networkmaps", nmap_name))
+            log.info("Created NetworkMap '%s' in '%s'", nmap_name, namespace)
+        except ApiException as e:
+            if e.status == 409:
+                log.info("NetworkMap '%s' already exists in '%s', reusing", nmap_name, namespace)
+            else:
+                return {"error": f"Failed to create NetworkMap: {e.status} {e.reason}"}
+
+        # Step 2: Create StorageMap
+        smap_name = f"{plan_name}-stormap"
+        datastore_ids = set()
+        for disk in target_vm.get("disks", []):
+            ds_id = disk.get("datastore", {}).get("id")
+            if ds_id:
+                datastore_ids.add(ds_id)
+
+        storage_map_entries = [
+            {"source": {"id": ds_id}, "destination": {"storageClass": TARGET_STORAGE_CLASS}}
+            for ds_id in datastore_ids
+        ]
+        if not storage_map_entries:
+            log.error("VM '%s' has no disks with datastores", vm_name)
+            return {"error": "VM has no disks with datastores -- cannot create StorageMap"}
+
+        smap = {
+            "apiVersion": _FORKLIFT_API,
+            "kind": "StorageMap", "metadata": {"name": smap_name, "namespace": namespace},
+            "spec": {
+                "provider": {"source": src_provider_ref, "destination": dst_provider_ref},
+                "map": storage_map_entries,
+            },
+        }
+        try:
+            _k8s_create(api,
+                group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+                namespace=namespace, plural="storagemaps", body=smap,
+            )
+            created_resources.append(("storagemaps", smap_name))
+            log.info("Created StorageMap '%s' in '%s'", smap_name, namespace)
+        except ApiException as e:
+            if e.status == 409:
+                log.info("StorageMap '%s' already exists in '%s', reusing", smap_name, namespace)
+            else:
+                log.error("Failed to create StorageMap '%s': %s. Orphaned resources: %s",
+                          smap_name, e.reason, created_resources)
+                return {"error": f"Failed to create StorageMap: {e.status} {e.reason}",
+                        "orphaned_resources": [f"{kind}/{name}" for kind, name in created_resources]}
+
+        # Step 3: Create Plan
+        plan_spec = {
+            "provider": {"source": src_provider_ref, "destination": dst_provider_ref},
+            "targetNamespace": target_namespace,
+            "map": {
+                "network": {"apiVersion": _FORKLIFT_API, "kind": "NetworkMap", "name": nmap_name, "namespace": namespace},
+                "storage": {"apiVersion": _FORKLIFT_API, "kind": "StorageMap", "name": smap_name, "namespace": namespace},
+            },
+            "vms": [{"id": target_vm["id"]}],
+        }
+
+        plan = {
+            "apiVersion": _FORKLIFT_API,
+            "kind": "Plan", "metadata": {"name": plan_name, "namespace": namespace},
+            "spec": plan_spec,
+        }
+        try:
+            _k8s_create(api,
+                group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+                namespace=namespace, plural="plans", body=plan,
+            )
+            created_resources.append(("plans", plan_name))
+            log.info("Created Plan '%s' in '%s'", plan_name, namespace)
+        except ApiException as e:
+            if e.status == 409:
+                log.info("Plan '%s' already exists in '%s', reusing", plan_name, namespace)
+            else:
+                log.error("Failed to create Plan '%s': %s. Orphaned resources: %s",
+                          plan_name, e.reason, created_resources)
+                return {"error": f"Failed to create Plan: {e.status} {e.reason}",
+                        "orphaned_resources": [f"{kind}/{name}" for kind, name in created_resources]}
+
+        # Step 4: Create Migration to trigger the plan
+        migration_name = f"{plan_name}-migration"
+        migration = {
+            "apiVersion": _FORKLIFT_API,
+            "kind": "Migration", "metadata": {"name": migration_name, "namespace": namespace},
+            "spec": {
+                "plan": {"name": plan_name, "namespace": namespace},
+            },
+        }
+        try:
+            _k8s_create(api,
+                group=FORKLIFT_GROUP, version=FORKLIFT_VERSION,
+                namespace=namespace, plural="migrations", body=migration,
+            )
+            log.info("Created Migration '%s' in '%s' -- migration started", migration_name, namespace)
+        except ApiException as e:
+            if e.status == 409:
+                log.info("Migration '%s' already exists in '%s'", migration_name, namespace)
+            else:
+                log.error("Failed to create Migration '%s': %s. Created resources: %s",
+                          migration_name, e.reason, created_resources)
+                return {"error": f"Failed to create Migration: {e.status} {e.reason}",
+                        "created_resources": [f"{kind}/{name}" for kind, name in created_resources]}
+
+        return {
+            "status": "Migration triggered",
+            "plan_name": plan_name,
+            "migration_name": migration_name,
+            "vm_name": vm_name,
+            "target_namespace": target_namespace,
+            "message": f"Migration of '{vm_name}' started. Use get_migration_status('{namespace}') to monitor progress.",
+        }
+
+    except ApiException as e:
+        body = ""
+        if e.body:
+            body = e.body[:200] if isinstance(e.body, str) else e.body.decode("utf-8", errors="replace")[:200]
+        log.error("Migration plan creation failed for '%s': %s %s %s", vm_name, e.status, e.reason, body)
+        return {"error": f"Kubernetes API error: {e.status} {e.reason} {body}"}
+    except Exception as e:
+        log.exception("Unexpected error creating migration plan for '%s'", vm_name)
+        return {"error": f"Error creating migration: {str(e)}"}
+
+
+def get_pod_logs(namespace: str, pod_pattern: str = "forklift", tail_lines: int = 50) -> dict:
+    """Get logs from pods matching a pattern for MTV troubleshooting.
+
+    Useful for debugging migration failures by reading forklift-controller,
+    virt-v2v, or cdi-importer pod logs.
+
+    Args:
+        namespace: Namespace to search for pods (e.g., openshift-mtv).
+        pod_pattern: Pattern to match pod names (e.g., forklift, virt-v2v, cdi).
+        tail_lines: Number of log lines to return from the end (default: 50).
+
+    Returns:
+        Dictionary with pod logs keyed by pod name.
+    """
+    if not K8S_AVAILABLE:
+        return {"error": "kubernetes Python client not installed"}
+
+    try:
+        core = virt_core_api()
+        pods = core.list_namespaced_pod(namespace=namespace)
+        matching = [p for p in pods.items if pod_pattern in p.metadata.name]
+
+        if not matching:
+            return {"error": f"No pods matching '{pod_pattern}' in namespace '{namespace}'"}
+
+        logs = {}
+        for pod in matching[:5]:
+            pod_name = pod.metadata.name
+            try:
+                for container in pod.spec.containers:
+                    log_content = core.read_namespaced_pod_log(
+                        name=pod_name, namespace=namespace,
+                        container=container.name, tail_lines=tail_lines,
+                    )
+                    key = f"{pod_name}/{container.name}" if len(pod.spec.containers) > 1 else pod_name
+                    logs[key] = log_content
+            except ApiException:
+                logs[pod_name] = "(unable to read logs)"
+
+        return {"namespace": namespace, "pattern": pod_pattern, "pod_count": len(matching), "logs": logs}
     except ApiException as e:
         return {"error": f"Kubernetes API error: {e.status} {e.reason}"}
     except Exception as e:
