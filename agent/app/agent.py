@@ -1,13 +1,13 @@
 """VMware-to-OpenShift Virtualization Migration Agent.
 
-Phase 4: Automated Migration and Monitoring.
+Phase 5: Post-Migration Validation and Completion Report.
 
-The agent can now trigger real VMware-to-OCP Virt migrations using MTV,
-with a mandatory human approval gate. It can monitor migration progress
-in real time and read forklift/virt-v2v logs for troubleshooting.
+The agent independently validates migrated VMs by running post-migration
+AAP playbooks, querying OCP Virt for VM state, comparing before/after,
+and generating formal sign-off reports.
 
-Single-agent mode is used for step-by-step demo control.
-Previous phase capabilities (connectivity, skills, VM inventory, AAP) remain.
+All tools from previous phases remain available. This is the final phase
+with the complete single-agent toolset.
 """
 
 import logging
@@ -92,49 +92,72 @@ def _after_tool_callback(tool, args, tool_context, tool_response):
     return None
 
 # ---------------------------------------------------------------------------
-# Phase 4 instruction
+# Phase 5 instruction
 # ---------------------------------------------------------------------------
-_PHASE4_INSTRUCTION = (
+_post_template_hint = (
+    f"The post-migration AAP job template ID is {POST_MIGRATION_TEMPLATE_ID}. "
+    "Use `launch_job(template_id)` with the VM hostname as extra_vars to trigger it. "
+    if POST_MIGRATION_TEMPLATE_ID else
+    "No POST_MIGRATION_TEMPLATE_ID is configured. Use `list_job_templates()` to discover "
+    "templates, or use bundled sample data: `load_skill_resource` with skill "
+    "`post-migration-validator`, resource `references/samples/post-migration-playbook-output.txt`. "
+)
+
+_PHASE5_INSTRUCTION = (
     "You are a VMware-to-OpenShift Virtualization migration agent.\n\n"
-    "## Current Phase: Phase 4 -- Automated Migration and Monitoring\n\n"
-    "You can now trigger real VMware-to-OCP Virt migrations using MTV and "
-    "monitor them in real time. The create_migration_plan tool requires "
-    "human approval before executing.\n\n"
-    "## Migration Tools\n"
-    f"- `create_migration_plan(namespace, vm_name)` -- Creates NetworkMap, StorageMap, Plan, "
-    "and Migration CRs to migrate a VM. **Requires human approval** before executing.\n"
-    f"- `get_migration_status(namespace)` -- Check MTV plan/migration progress (default: {DEFAULT_MTV_NAMESPACE})\n"
-    "- `get_pod_logs(namespace, pod_pattern, tail_lines)` -- Read forklift/virt-v2v/CDI pod logs\n\n"
+    "## Current Phase: Phase 5 -- Post-Migration Validation and Completion Report\n\n"
+    "You have the complete toolset for the entire migration workflow. You can now "
+    "validate migrated VMs and produce formal sign-off reports.\n\n"
+    "## Post-Migration Validation\n"
+    f"{_post_template_hint}\n"
+    "When asked to validate a migrated VM:\n"
+    "1. Launch the post-migration validation playbook via `launch_job`\n"
+    "2. Poll `get_job_status` until complete\n"
+    "3. Retrieve output with `get_job_output`\n"
+    "4. Load `ansible-output-parser` skill to parse the output\n"
+    "5. Load `post-migration-validator` skill for 39-check evaluation\n"
+    "6. Also call `list_migrated_vms` and `get_vm_details` to verify VM state on OCP Virt\n"
+    "7. Compare against source VM data from `list_vmware_vms`\n"
+    "8. Generate validation report\n"
+    "9. Save with `save_report_artifact`\n\n"
+    "## Completion Report\n"
+    "When asked to generate a completion report:\n"
+    "1. Load `completion-report-generator` skill\n"
+    "2. Produce a formal Markdown report containing:\n"
+    "   - Migration summary (VM name, source, target, cluster, AZ)\n"
+    "   - Before/after comparison table (CPU, memory, IP, guest agent, firmware)\n"
+    "   - Pre-migration assessment summary\n"
+    "   - Migration timeline\n"
+    "   - Post-migration validation results (PASS/FAIL per category)\n"
+    "   - Outstanding items and remediation\n"
+    "   - Sign-off section\n"
+    "3. Save with `save_report_artifact`\n\n"
+    "## Migration Tools (from Phase 4)\n"
+    f"- `create_migration_plan(namespace, vm_name)` -- Trigger migration (requires approval)\n"
+    f"- `get_migration_status(namespace)` -- Check progress (default: {DEFAULT_MTV_NAMESPACE})\n"
+    "- `get_pod_logs(namespace, pod_pattern)` -- Read forklift/virt-v2v logs\n\n"
     "## VM Discovery Tools (from Phase 2)\n"
     f"- `list_vmware_vms(namespace)` -- List VMware VMs (default: {DEFAULT_MTV_NAMESPACE})\n"
     f"- `list_migrated_vms(namespace)` -- List OCP Virt VMs (default: {DEFAULT_VIRT_NAMESPACE})\n"
     "- `get_vm_details(namespace, vm_name)` -- Detailed VM spec\n\n"
     "## AAP Tools (from Phase 3)\n"
-    "- `list_job_templates()` -- List AAP templates\n"
-    "- `launch_job(template_id, extra_vars)` -- Trigger Ansible playbook\n"
-    "- `get_job_status(job_id)` -- Poll job progress\n"
-    "- `get_job_output(job_id)` -- Retrieve playbook output\n\n"
-    "## Migration Workflow\n"
-    "When asked to migrate a VM:\n"
-    "1. Call `create_migration_plan(namespace, vm_name)` -- this will pause for approval\n"
-    "2. After approval, the tool creates the MTV resources and starts the migration\n"
-    "3. Use `get_migration_status(namespace)` to monitor progress\n"
-    "4. If errors occur, use `get_pod_logs(namespace, 'forklift')` to read logs\n"
-    "5. Load the `mtv-log-analyzer` skill to diagnose failures\n\n"
+    "- `list_job_templates()` / `launch_job()` / `get_job_status()` / `get_job_output()`\n\n"
     "## Skills\n"
-    "Use `list_skills` to see all 11 available skills.\n"
-    "Key skills for troubleshooting: mtv-log-analyzer (12 failure patterns).\n\n"
+    "Use `list_skills` for all 11 skills. Key skills for this phase:\n"
+    "- `post-migration-validator` -- 39 checks across 9 categories\n"
+    "- `completion-report-generator` -- formal report template\n"
+    "- `ansible-output-parser` -- parse AAP output format\n\n"
+    "## Sample Data (if AAP not configured)\n"
+    "- Post-migration: `load_skill_resource` with skill `post-migration-validator`, "
+    "resource `references/samples/post-migration-playbook-output.txt`\n\n"
     "## Connectivity\n"
-    "Use `check_connectivity` to verify all system connections.\n\n"
-    "## What You Cannot Do Yet\n"
-    "- Run post-migration validation playbooks (Phase 5)\n"
-    "- Generate completion reports with before/after comparison (Phase 5)\n"
+    "Use `check_connectivity` to verify all system connections.\n"
 )
 
 # ---------------------------------------------------------------------------
 # Build the agent
 # ---------------------------------------------------------------------------
-log.info("Building Phase 4 agent: migration execution and monitoring")
+log.info("Building Phase 5 agent: post-migration validation and completion report")
 
 tools = [
     check_connectivity,
@@ -158,14 +181,14 @@ root_agent = LlmAgent(
     name=AGENT_NAME,
     description=(
         "VMware-to-OpenShift Virtualization migration agent. "
-        "Phase 4: Migration execution with human approval gate, "
-        "real-time monitoring, and log-based troubleshooting."
+        "Phase 5: Complete toolset with post-migration validation "
+        "and formal completion report generation."
     ),
-    instruction=_PHASE4_INSTRUCTION,
+    instruction=_PHASE5_INSTRUCTION,
     tools=tools,
     generate_content_config=_GENERATE_CONFIG,
     before_tool_callback=_before_tool_callback,
     after_tool_callback=_after_tool_callback,
 )
 
-log.info("Phase 4 agent ready: %s (tools: %d, skills: %d)", root_agent.name, len(tools), len(skills))
+log.info("Phase 5 agent ready: %s (tools: %d, skills: %d)", root_agent.name, len(tools), len(skills))

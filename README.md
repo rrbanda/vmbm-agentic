@@ -15,8 +15,8 @@ is demonstrable in a single working session.
 | 1 | Working UI with Demo Mode | 11 skills, sample data analysis, reports |
 | **2** | Live VM Inventory | Read-only VMware inventory via MTV |
 | 3 | Live Pre-Migration Assessment | AAP integration for Ansible playbooks |
-| **4** | **Automated Migration & Monitoring** | MTV write access, HITL approval, log analysis | **<-- Current** |
-| 5 | Post-Migration Validation & Report | Full validation, before/after comparison, sign-off |
+| **4** | Automated Migration & Monitoring | MTV write access, HITL approval, log analysis |
+| **5** | **Post-Migration Validation & Report** | Full validation, before/after comparison, sign-off | **<-- Current** |
 
 ## Current Phase: Phase 1
 
